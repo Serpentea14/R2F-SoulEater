@@ -1,0 +1,2 @@
+# Ignore private config folder (contains webhook)
+ServerScriptService/Config/
