@@ -1,1 +1,463 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
+local RunService = game:GetService("RunService")
 
+local CONSUME_SOUND_ID = "rbxassetid://133537522827881"
+local KILL_SOUND_ID = "rbxassetid://109462129018702"
+local DISAPPOINT_SOUND_ID = "rbxassetid://129534580039933"
+local PROVE_WORTH_SOUND_ID = "rbxassetid://140388181095956"
+local RAMPAGE_POPUP_SOUND_ID = "rbxassetid://133537522827881"
+local RAMPAGE_LOOP_SOUND_ID = "rbxassetid://139339758239084"
+
+local MAX_SOULS = 20
+local RAMPAGE_DURATION = 60
+local RAMPAGE_FOV = 100
+local DEFAULT_FOV = 70
+
+local movesFolder = ReplicatedStorage:WaitForChild("Moves")
+local eventsFolder = ReplicatedStorage:WaitForChild("Events")
+
+local rampageActive = false
+local playerStates = {}
+
+getfenv().Activated = false
+
+local function createAura(character)
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "RampageAura"
+	attachment.Parent = root
+
+	local particles = Instance.new("ParticleEmitter")
+	particles.Brightness = 3
+	particles.Color = ColorSequence.new(Color3.fromRGB(255, 0, 0))
+	particles.LightEmission = 0.5
+	particles.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})
+	particles.Size = NumberSequence.new({NumberSequenceKeypoint.new(0, 2), NumberSequenceKeypoint.new(1, 0)})
+	particles.Lifetime = NumberRange.new(0.5, 1)
+	particles.Rate = 50
+	particles.Speed = NumberRange.new(5, 10)
+	particles.SpreadAngle = Vector2.new(180, 180)
+	particles.Parent = attachment
+
+	return attachment
+end
+
+local function screenShake(intensity, duration)
+	local camera = workspace.CurrentCamera
+	local startTime = os.clock()
+	
+	task.spawn(function()
+		while os.clock() - startTime < duration do
+			local offset = Vector3.new(
+				math.random(-intensity, intensity),
+				math.random(-intensity, intensity),
+				math.random(-intensity, intensity)
+			) * 0.1
+			camera.CFrame = camera.CFrame * CFrame.new(offset)
+			RunService.RenderStepped:Wait()
+		end
+	end)
+end
+
+local function FillHeat()
+	local Event = eventsFolder:FindFirstChild("ME")
+	local TauntMove = movesFolder:FindFirstChild("Taunt")
+
+	if Event and TauntMove then
+		for i = 1, 6 do
+			local A_1 = {
+				[1] = "heat",
+				[2] = TauntMove
+			}
+			Event:FireServer(A_1)
+		end
+	end
+end
+
+local function playSound(parent, soundId, looped, volume)
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Looped = looped or false
+	sound.Volume = volume or 1
+	sound.Parent = parent
+	sound:Play()
+
+	if not looped then
+		Debris:AddItem(sound, 10)
+	end
+
+	return sound
+end
+
+local function showTypewriterBillboard(character, message, soundId)
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "RampageBillboard"
+	billboard.Size = UDim2.new(0, 400, 0, 100)
+	billboard.StudsOffset = Vector3.new(0, 4, 0)
+	billboard.Adornee = head
+	billboard.AlwaysOnTop = true
+	billboard.Parent = head
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 1, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = ""
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextStrokeTransparency = 0
+	textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.Parent = billboard
+
+	local currentSound = soundId or RAMPAGE_POPUP_SOUND_ID
+
+	for i = 1, #message do
+		local char = message:sub(i, i)
+		textLabel.Text = message:sub(1, i)
+		
+		if char ~= " " then
+			playSound(head, currentSound, false, 0.4)
+			screenShake(0.5, 0.05)
+		end
+		task.wait(0.04)
+	end
+
+	task.wait(2)
+
+	local fadeTween = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, TextStrokeTransparency = 1 })
+	fadeTween:Play()
+	
+	fadeTween.Completed:Connect(function()
+		billboard:Destroy()
+	end)
+end
+
+local function showPopup(player, message, soundId)
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "Popup_" .. message:gsub(" ", "_")
+	screenGui.IgnoreGuiInset = true
+	screenGui.DisplayOrder = 999
+	screenGui.Parent = playerGui
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 0, 120)
+	textLabel.Position = UDim2.new(0, 0, 0.4, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = message:upper()
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.TextTransparency = 1
+	textLabel.Parent = screenGui
+
+	playSound(textLabel, soundId, false, 1)
+
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	local fadeIn = TweenService:Create(textLabel, info, { TextTransparency = 0, Position = UDim2.new(0, 0, 0.45, 0) })
+	
+	fadeIn:Play()
+	fadeIn.Completed:Wait()
+
+	task.wait(2)
+
+	local fadeOut = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, Position = UDim2.new(0, 0, 0.5, 0) })
+	fadeOut:Play()
+	fadeOut.Completed:Wait()
+
+	screenGui:Destroy()
+end
+
+local function showPopupToAll(message, soundId)
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(showPopup, player, message, soundId)
+	end
+end
+
+local function updateSoulsUI(state)
+	if state.soulsLabel then
+		local percentage = state.soulsCount / MAX_SOULS
+		state.soulsLabel.Text = "SOULS: " .. tostring(state.soulsCount) .. " / " .. MAX_SOULS
+		
+		local bar = state.soulsLabel:FindFirstChild("ProgressBar")
+		if bar then
+			TweenService:Create(bar, TweenInfo.new(0.3), { Size = UDim2.new(percentage, 0, 0, 4) }):Play()
+		end
+		
+		if state.soulsCount > 0 then
+			TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0.2, 0.2) }):Play()
+			task.delay(0.1, function()
+				TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0, 0) }):Play()
+			end)
+		end
+	end
+end
+
+local function ensureKillGoal(statsFolder)
+	local killGoal = statsFolder:FindFirstChild("killgoal")
+	if not killGoal then
+		killGoal = Instance.new("IntValue")
+		killGoal.Name = "killgoal"
+		killGoal.Parent = statsFolder
+	end
+	killGoal.Value = MAX_SOULS
+	return killGoal
+end
+
+local function getOrCreateEffects()
+	local cc = Lighting:FindFirstChild("RampageColorCorrection") or Instance.new("ColorCorrectionEffect", Lighting)
+	cc.Name = "RampageColorCorrection"
+	
+	local bloom = Lighting:FindFirstChild("RampageBloom") or Instance.new("BloomEffect", Lighting)
+	bloom.Name = "RampageBloom"
+	bloom.Intensity = 0
+	
+	local blur = Lighting:FindFirstChild("RampageBlur") or Instance.new("BlurEffect", Lighting)
+	blur.Name = "RampageBlur"
+	blur.Size = 0
+	
+	return cc, bloom, blur
+end
+
+local function tweenRampageVisuals(active)
+	local cc, bloom, blur = getOrCreateEffects()
+	local camera = workspace.CurrentCamera
+	
+	local ccGoal = active and { Saturation = -0.5, TintColor = Color3.fromRGB(150, 0, 0), Contrast = 0.2 } or { Saturation = 0, TintColor = Color3.new(1, 1, 1), Contrast = 0 }
+	local bloomGoal = active and { Intensity = 2, Size = 24 } or { Intensity = 0, Size = 0 }
+	local blurGoal = active and { Size = 4 } or { Size = 0 }
+	local fovGoal = active and { FieldOfView = RAMPAGE_FOV } or { FieldOfView = DEFAULT_FOV }
+
+	TweenService:Create(cc, TweenInfo.new(1), ccGoal):Play()
+	TweenService:Create(bloom, TweenInfo.new(1), bloomGoal):Play()
+	TweenService:Create(blur, TweenInfo.new(1), blurGoal):Play()
+	TweenService:Create(camera, TweenInfo.new(2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), fovGoal):Play()
+end
+
+local function addSuperArmorToFolder(folder)
+	if not folder or not folder:IsA("Folder") or folder.Name == "SuperArmor" then return end
+	if not folder:IsDescendantOf(movesFolder) then return end
+
+	if not folder:FindFirstChild("SuperArmor") then
+		local superArmor = Instance.new("Folder")
+		superArmor.Name = "SuperArmor"
+		superArmor.Parent = folder
+	end
+end
+
+local function addSuperArmorFolders()
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		addSuperArmorToFolder(obj)
+	end
+end
+
+local function removeAllSuperArmorFolders()
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		if obj:IsA("Folder") and obj.Name == "SuperArmor" then
+			obj:Destroy()
+		end
+	end
+end
+
+local function startRampage(triggeringPlayer)
+	if rampageActive then return end
+	rampageActive = true
+
+	ReplicatedStorage.Styles.Brawler.VisualName.Value = "FISTICUFFS"
+	getfenv().Activated = true
+
+	task.spawn(function()
+		while getfenv().Activated do
+			FillHeat()
+			task.wait(0.1)
+		end
+	end)
+
+	local aura
+	if triggeringPlayer and triggeringPlayer.Character then
+		task.spawn(showTypewriterBillboard, triggeringPlayer.Character, "PROVE YOUR WORTH.", PROVE_WORTH_SOUND_ID)
+		aura = createAura(triggeringPlayer.Character)
+		screenShake(2, 1)
+	end
+
+	showPopupToAll("RAMPAGE", RAMPAGE_POPUP_SOUND_ID)
+	tweenRampageVisuals(true)
+
+	local rampageLoopSound = playSound(SoundService, RAMPAGE_LOOP_SOUND_ID, true, 0.8)
+	addSuperArmorFolders()
+
+	local descendantConnection = movesFolder.DescendantAdded:Connect(function(obj)
+		if rampageActive and obj:IsA("Folder") then
+			task.defer(addSuperArmorToFolder, obj)
+		end
+	end)
+
+	task.delay(RAMPAGE_DURATION, function()
+		descendantConnection:Disconnect()
+		
+		if aura then aura:Destroy() end
+
+		if rampageLoopSound then
+			TweenService:Create(rampageLoopSound, TweenInfo.new(2), { Volume = 0 }):Play()
+			task.delay(2, function() rampageLoopSound:Destroy() end)
+		end
+
+		getfenv().Activated = false
+		removeAllSuperArmorFolders()
+		tweenRampageVisuals(false)
+		rampageActive = false
+
+		for player, state in pairs(playerStates) do
+			state.soulsCount = 0
+			state.killGoal.Value = MAX_SOULS
+			updateSoulsUI(state)
+			
+			local queued = state.pendingKills or 0
+			state.pendingKills = 0
+			if queued > 0 then
+				task.spawn(function()
+					for i = 1, queued do
+						if rampageActive then return end
+						task.wait(0.2)
+						state.soulsCount += 1
+						if state.soulsCount >= MAX_SOULS then
+							startRampage(player)
+							return
+						end
+						updateSoulsUI(state)
+					end
+				end)
+			end
+		end
+	end)
+end
+
+local function processKills(player, state, gained)
+	if gained <= 0 then return end
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	for i = 1, gained do
+		playSound(playerGui, KILL_SOUND_ID, false, 0.8)
+		screenShake(0.3, 0.2)
+
+		if rampageActive then
+			state.pendingKills = (state.pendingKills or 0) + (gained - i + 1)
+			return
+		end
+
+		state.soulsCount += 1
+		if state.soulsCount >= MAX_SOULS then
+			state.soulsCount = MAX_SOULS
+			state.killGoal.Value = 0
+			updateSoulsUI(state)
+			startRampage(player)
+			return
+		else
+			state.killGoal.Value = MAX_SOULS - state.soulsCount
+			updateSoulsUI(state)
+		end
+	end
+end
+
+local function hookCharacter(player, state, character)
+	if state.healthConnection then state.healthConnection:Disconnect() end
+	local humanoid = character:WaitForChild("Humanoid")
+	state.dead = false
+
+	state.healthConnection = humanoid.Died:Connect(function()
+		if not state.dead then
+			state.dead = true
+			
+			-- Logic Fix: Resetting souls and showing the disappointment popup
+			state.soulsCount = 0
+			state.pendingKills = 0
+			state.killGoal.Value = MAX_SOULS
+			updateSoulsUI(state)
+			
+			task.spawn(showPopup, player, "YOU DISAPPOINT", DISAPPOINT_SOUND_ID)
+		end
+	end)
+end
+
+local function setupPlayer(player)
+	local playerGui = player:WaitForChild("PlayerGui")
+	local status = player:WaitForChild("Status")
+	local statsFolder = status:WaitForChild("Stats")
+	local killsValue = statsFolder:WaitForChild("Kills")
+	local killGoalValue = ensureKillGoal(statsFolder)
+
+	local state = {
+		soulsCount = 0,
+		pendingKills = 0,
+		killGoal = killGoalValue,
+		soulsLabel = nil,
+		healthConnection = nil,
+		dead = false,
+		lastKills = killsValue.Value,
+	}
+	playerStates[player] = state
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SoulsGui"
+	gui.ResetOnSpawn = false
+	gui.Parent = playerGui
+
+	local soulsLabel = Instance.new("TextLabel")
+	soulsLabel.Name = "Souls"
+	soulsLabel.Size = UDim2.new(0, 200, 0, 40)
+	soulsLabel.Position = UDim2.new(1, -210, 0, 20)
+	soulsLabel.BackgroundTransparency = 1
+	soulsLabel.TextColor3 = Color3.new(1, 0, 0)
+	soulsLabel.TextScaled = true
+	soulsLabel.Font = Enum.Font.Antique
+	soulsLabel.TextXAlignment = Enum.TextXAlignment.Right
+	soulsLabel.Parent = gui
+
+	local progressBar = Instance.new("Frame")
+	progressBar.Name = "ProgressBar"
+	progressBar.Size = UDim2.new(0, 0, 0, 4)
+	progressBar.Position = UDim2.new(0, 0, 1, 0)
+	progressBar.BackgroundColor3 = Color3.new(1, 0, 0)
+	progressBar.BorderSizePixel = 0
+	progressBar.Parent = soulsLabel
+
+	state.soulsLabel = soulsLabel
+	updateSoulsUI(state)
+
+	task.spawn(showPopup, player, "CONSUME", CONSUME_SOUND_ID)
+
+	killsValue:GetPropertyChangedSignal("Value"):Connect(function()
+		if not playerStates[player] then return end
+		local newKills = killsValue.Value
+		local gained = newKills - state.lastKills
+		if gained > 0 then
+			processKills(player, state, gained)
+		end
+		state.lastKills = newKills
+	end)
+
+	player.CharacterAdded:Connect(function(character) hookCharacter(player, state, character) end)
+	if player.Character then hookCharacter(player, state, player.Character) end
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerRemoving:Connect(function(player)
+	if playerStates[player] and playerStates[player].healthConnection then
+		playerStates[player].healthConnection:Disconnect()
+	end
+	playerStates[player] = nil
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do task.spawn(setupPlayer, player) end
