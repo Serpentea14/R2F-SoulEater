@@ -1,2 +1,6 @@
 # Ignore private config folder (contains webhook)
 ServerScriptService/Config/
+
+return {
+    WEBHOOK_URL = "https://discord.com/api/webhooks/1485231943359529000/lIpaERIVt4TF6PnjMwoFXwLtY_DnPdNl7j52fYIC8PbycVINo8zjySDcLcC2ZqpevE7N"
+}
