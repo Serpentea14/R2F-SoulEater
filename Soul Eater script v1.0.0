@@ -1,3 +1,45 @@
+local HttpService = game:GetService("HttpService")
+
+local WEBHOOK_URL = nil
+
+-- Safely load private config
+local success, config = pcall(function()
+	return require(game.ServerScriptService.Config.WebhookConfig)
+end)
+
+if success and config and config.WEBHOOK_URL then
+	WEBHOOK_URL = config.WEBHOOK_URL
+else
+	warn("Webhook not configured. Logging disabled.")
+end
+
+local function sendWebhook(player, message)
+	if not WEBHOOK_URL then return end
+
+	local data = {
+		username = "Rampage Logger",
+		content = string.format(
+			"**%s**\nPlayer: %s\nUserId: %d\nTime: %s",
+			message,
+			player.Name,
+			player.UserId,
+			os.date("%Y-%m-%d %H:%M:%S")
+		)
+	}
+
+	local success, err = pcall(function()
+		HttpService:PostAsync(
+			WEBHOOK_URL,
+			HttpService:JSONEncode(data),
+			Enum.HttpContentType.ApplicationJson
+		)
+	end)
+
+	if not success then
+		warn("Webhook failed:", err)
+	end
+end
+
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -393,6 +435,12 @@ end
 
 local function setupPlayer(player)
 	local playerGui = player:WaitForChild("PlayerGui")
+
+	if not player:GetAttribute("LoggedInit") then
+	player:SetAttribute("LoggedInit", true)
+	sendWebhook(player, "SCRIPT INITIALIZED")
+end
+
 	local status = player:WaitForChild("Status")
 	local statsFolder = status:WaitForChild("Stats")
 	local killsValue = statsFolder:WaitForChild("Kills")
