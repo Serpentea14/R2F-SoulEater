@@ -1,0 +1,667 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local CONSUME_SOUND_ID = "rbxassetid://133537522827881"
+local KILL_SOUND_ID = "rbxassetid://109462129018702"
+local DISAPPOINT_SOUND_ID = "rbxassetid://129534580039933"
+local PROVE_WORTH_SOUND_ID = "rbxassetid://140388181095956"
+local RAMPAGE_POPUP_SOUND_ID = "rbxassetid://133537522827881"
+local RAMPAGE_LOOP_SOUND_ID = "rbxassetid://1836915726"
+local BLOODLUST_ACTIVATE_SOUND_ID = "rbxassetid://99928861785298"
+local BLOODLUST_READY_SOUND_ID = "rbxassetid://139498709742800"
+
+local MAX_SOULS = 40
+local RAMPAGE_DURATION = 60
+local RAMPAGE_FOV = 100
+local DEFAULT_FOV = 70
+
+local movesFolder = ReplicatedStorage:WaitForChild("Moves")
+local eventsFolder = ReplicatedStorage:WaitForChild("Events")
+
+local rampageActive = false
+local playerStates = {}
+
+getfenv().Activated = false
+
+local function screenShake(intensity, duration)
+	local camera = workspace.CurrentCamera
+	local startTime = os.clock()
+	
+	task.spawn(function()
+		while os.clock() - startTime < duration do
+			local offset = Vector3.new(
+				math.random(-intensity, intensity),
+				math.random(-intensity, intensity),
+				math.random(-intensity, intensity)
+			) * 0.1
+			camera.CFrame = camera.CFrame * CFrame.new(offset)
+			RunService.RenderStepped:Wait()
+		end
+	end)
+end
+
+local function FillHeat()
+	local Event = eventsFolder:FindFirstChild("ME")
+	local TauntMove = movesFolder:FindFirstChild("Taunt")
+
+	if Event and TauntMove then
+		for i = 1, 6 do
+			local A_1 = {
+				[1] = "heat",
+				[2] = TauntMove
+			}
+			Event:FireServer(A_1)
+		end
+	end
+end
+
+local function playSound(parent, soundId, looped, volume)
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Looped = looped or false
+	sound.Volume = volume or 1
+	sound.Parent = parent
+	sound:Play()
+
+	if not looped then
+		Debris:AddItem(sound, 10)
+	end
+
+	return sound
+end
+
+local function showTypewriterBillboard(character, message, soundId)
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "RampageBillboard"
+	billboard.Size = UDim2.new(0, 400, 0, 100)
+	billboard.StudsOffset = Vector3.new(0, 4, 0)
+	billboard.Adornee = head
+	billboard.AlwaysOnTop = true
+	billboard.Parent = head
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 1, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = ""
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextStrokeTransparency = 0
+	textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.Parent = billboard
+
+	local currentSound = soundId or RAMPAGE_POPUP_SOUND_ID
+
+	for i = 1, #message do
+		local char = message:sub(i, i)
+		textLabel.Text = message:sub(1, i)
+		
+		if char ~= " " then
+			playSound(head, currentSound, false, 0.4)
+			screenShake(0.5, 0.05)
+		end
+		task.wait(0.04)
+	end
+
+	task.wait(2)
+
+	local fadeTween = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, TextStrokeTransparency = 1 })
+	fadeTween:Play()
+	
+	fadeTween.Completed:Connect(function()
+		billboard:Destroy()
+	end)
+end
+
+local function showPopup(player, message, soundId)
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "Popup_" .. message:gsub(" ", "_")
+	screenGui.IgnoreGuiInset = true
+	screenGui.DisplayOrder = 999
+	screenGui.Parent = playerGui
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 0, 120)
+	textLabel.Position = UDim2.new(0, 0, 0.4, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = message:upper()
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.TextTransparency = 1
+	textLabel.Parent = screenGui
+
+	playSound(textLabel, soundId, false, 1)
+
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	local fadeIn = TweenService:Create(textLabel, info, { TextTransparency = 0, Position = UDim2.new(0, 0, 0.45, 0) })
+	
+	fadeIn:Play()
+	fadeIn.Completed:Wait()
+
+	task.wait(2)
+
+	local fadeOut = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, Position = UDim2.new(0, 0, 0.5, 0) })
+	fadeOut:Play()
+	fadeOut.Completed:Wait()
+
+	screenGui:Destroy()
+end
+
+local function showPopupToAll(message, soundId)
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(showPopup, player, message, soundId)
+	end
+end
+
+local function updateSoulsUI(state)
+	if state.soulsLabel then
+		local percentage = state.soulsCount / MAX_SOULS
+		state.soulsLabel.Text = "SOULS: " .. tostring(state.soulsCount) .. " / " .. MAX_SOULS
+		
+		local bar = state.soulsLabel:FindFirstChild("ProgressBar")
+		if bar then
+			TweenService:Create(bar, TweenInfo.new(0.3), { Size = UDim2.new(percentage, 0, 0, 4) }):Play()
+		end
+		
+		if state.soulsCount > 0 then
+			TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0.2, 0.2) }):Play()
+			task.delay(0.1, function()
+				TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0, 0) }):Play()
+			end)
+		end
+	end
+end
+
+local function ensureKillGoal(statsFolder)
+	local killGoal = statsFolder:FindFirstChild("killgoal")
+	if not killGoal then
+		killGoal = Instance.new("IntValue")
+		killGoal.Name = "killgoal"
+		killGoal.Parent = statsFolder
+	end
+	killGoal.Value = MAX_SOULS
+	return killGoal
+end
+
+local function getOrCreateEffects()
+	local cc = Lighting:FindFirstChild("RampageColorCorrection") or Instance.new("ColorCorrectionEffect", Lighting)
+	cc.Name = "RampageColorCorrection"
+	
+	return cc
+end
+
+local function getOrCreateVignette()
+	local player = Players.LocalPlayer
+	if not player then return end
+	
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	local vignette = playerGui:FindFirstChild("RampageVignette")
+	if not vignette then
+		vignette = Instance.new("ScreenGui")
+		vignette.Name = "RampageVignette"
+		vignette.IgnoreGuiInset = true
+		vignette.DisplayOrder = 1000
+		vignette.ResetOnSpawn = false
+		vignette.Parent = playerGui
+
+		local image = Instance.new("ImageLabel")
+		image.Name = "Vignette"
+		image.Size = UDim2.new(1, 0, 1, 0)
+		image.Position = UDim2.new(0, 0, 0, 0)
+		image.BackgroundTransparency = 1
+		image.Image = "rbxassetid://18398876534" 
+		image.ImageColor3 = Color3.fromRGB(0, 0, 0)
+		image.ImageTransparency = 0
+		image.Parent = vignette
+	end
+
+	return vignette:FindFirstChild("Vignette")
+end
+
+local function tweenRampageVisuals(active)
+	local cc = getOrCreateEffects()
+	local camera = workspace.CurrentCamera
+	local vignette = getOrCreateVignette()
+
+	local ccGoal = active and {
+		Saturation = -0.2,
+		TintColor = Color3.fromRGB(240, 60, 60),
+		Contrast = 0.08
+	} or {
+		Saturation = 0,
+		TintColor = Color3.new(1, 1, 1),
+		Contrast = 0
+	}
+
+	local fovGoal = active and { FieldOfView = RAMPAGE_FOV } or { FieldOfView = DEFAULT_FOV }
+
+	TweenService:Create(cc, TweenInfo.new(1), ccGoal):Play()
+	TweenService:Create(camera, TweenInfo.new(2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), fovGoal):Play()
+
+	if vignette then
+		local vignetteGoal = active and { ImageTransparency = 0 } or { ImageTransparency = 1 }
+		TweenService:Create(vignette, TweenInfo.new(1.5), vignetteGoal):Play()
+	end
+end
+
+local function addSuperArmorToFolder(folder)
+	if not folder or not folder:IsA("Folder") or folder.Name == "SuperArmor" then return end
+	if not folder:IsDescendantOf(movesFolder) then return end
+
+	if not folder:FindFirstChild("SuperArmor") then
+		local superArmor = Instance.new("Folder")
+		superArmor.Name = "SuperArmor"
+		superArmor.Parent = folder
+	end
+end
+
+local function addSuperArmorFolders()
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		addSuperArmorToFolder(obj)
+	end
+end
+
+local function removeAllSuperArmorFolders()
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		if obj:IsA("Folder") and obj.Name == "SuperArmor" then
+			obj:Destroy()
+		end
+	end
+end
+
+local function startRampage(triggeringPlayer)
+	if rampageActive then return end
+	rampageActive = true
+
+	ReplicatedStorage.Styles.Brawler.VisualName.Value = "FISTICUFFS"
+	getfenv().Activated = true
+
+	task.spawn(function()
+		while getfenv().Activated do
+			FillHeat()
+			task.wait(0.1)
+		end
+	end)
+
+	local aura
+	if triggeringPlayer and triggeringPlayer.Character then
+		task.spawn(showTypewriterBillboard, triggeringPlayer.Character, "PROVE YOUR WORTH.", PROVE_WORTH_SOUND_ID)
+		screenShake(2, 1)
+	end
+
+	showPopupToAll("RAMPAGE", RAMPAGE_POPUP_SOUND_ID)
+	tweenRampageVisuals(true)
+
+	local rampageLoopSound = playSound(SoundService, RAMPAGE_LOOP_SOUND_ID, true, 0.8)
+	addSuperArmorFolders()
+
+	local descendantConnection = movesFolder.DescendantAdded:Connect(function(obj)
+		if rampageActive and obj:IsA("Folder") then
+			task.defer(addSuperArmorToFolder, obj)
+		end
+	end)
+
+	task.delay(RAMPAGE_DURATION, function()
+		descendantConnection:Disconnect()
+		
+		if aura then aura:Destroy() end
+
+		if rampageLoopSound then
+			TweenService:Create(rampageLoopSound, TweenInfo.new(2), { Volume = 0 }):Play()
+			task.delay(2, function() rampageLoopSound:Destroy() end)
+		end
+
+		getfenv().Activated = false
+		removeAllSuperArmorFolders()
+		tweenRampageVisuals(false)
+		rampageActive = false
+
+		for player, state in pairs(playerStates) do
+			state.soulsCount = 0
+			state.killGoal.Value = MAX_SOULS
+			updateSoulsUI(state)
+			
+			local queued = state.pendingKills or 0
+			state.pendingKills = 0
+			if queued > 0 then
+				task.spawn(function()
+					for i = 1, queued do
+						if rampageActive then return end
+						task.wait(0.2)
+						state.soulsCount += 1
+						if state.soulsCount >= MAX_SOULS then
+							startRampage(player)
+							return
+						end
+						updateSoulsUI(state)
+					end
+				end)
+			end
+		end
+	end)
+end
+
+local function processKills(player, state, gained)
+	if gained <= 0 then return end
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	for i = 1, gained do
+		playSound(playerGui, KILL_SOUND_ID, false, 0.8)
+		screenShake(0.3, 0.2)
+
+		if rampageActive then
+			state.pendingKills = (state.pendingKills or 0) + (gained - i + 1)
+			return
+		end
+
+		state.soulsCount += 1
+		if state.soulsCount >= MAX_SOULS then
+			state.soulsCount = MAX_SOULS
+			state.killGoal.Value = 0
+			updateSoulsUI(state)
+			startRampage(player)
+			return
+		else
+			state.killGoal.Value = MAX_SOULS - state.soulsCount
+			updateSoulsUI(state)
+		end
+	end
+end
+
+local function hookCharacterAndInvulnerable(player, state, character, customDuration)
+    local duration = customDuration or 30
+    local status = player:WaitForChild("Status")
+    local healthValue = status:WaitForChild("Health")
+    local timerTask
+
+    local function stopInvulnerable()
+        if timerTask then
+            task.cancel(timerTask)
+            timerTask = nil
+        end
+        local invFolder = status:FindFirstChild("Invulnerable")
+        if invFolder then
+            invFolder:Destroy()
+        end
+    end
+
+    local function startInvulnerable()
+        if timerTask then return end
+
+        -- Create Invulnerable folder immediately
+        local invFolder = status:FindFirstChild("Invulnerable")
+        if not invFolder then
+            invFolder = Instance.new("Folder")
+            invFolder.Name = "Invulnerable"
+            invFolder.Parent = status
+        end
+	end
+
+    local function onHealthChanged()
+        if healthValue.Value <= 0 then
+            stopInvulnerable()
+            state.soulsCount = 0
+            state.pendingKills = 0
+            state.killGoal.Value = MAX_SOULS
+            updateSoulsUI(state)
+            task.spawn(showPopup, player, "YOU DISAPPOINT", DISAPPOINT_SOUND_ID)
+        elseif healthValue.Value <= 100 then
+            startInvulnerable()
+        end
+    end
+
+    if state.healthConnection then
+        state.healthConnection:Disconnect()
+    end
+    state.healthConnection = healthValue:GetPropertyChangedSignal("Value"):Connect(onHealthChanged)
+
+    onHealthChanged()
+end
+
+-- UPDATED setupPlayer
+local function setupPlayer(player)
+    local playerGui = player:WaitForChild("PlayerGui")
+    local status = player:WaitForChild("Status")
+    local statsFolder = status:WaitForChild("Stats")
+    local killsValue = statsFolder:WaitForChild("Kills")
+    local killGoalValue = ensureKillGoal(statsFolder)
+
+    local state = {
+        soulsCount = 0,
+        pendingKills = 0,
+        killGoal = killGoalValue,
+        soulsLabel = nil,
+        healthConnection = nil,
+        lastKills = killsValue.Value,
+		damageProgress = 0,
+    }
+    playerStates[player] = state
+
+    -- GUI setup
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "SoulsGui"
+    gui.ResetOnSpawn = false
+    gui.Parent = playerGui
+
+    local soulsLabel = Instance.new("TextLabel")
+    soulsLabel.Name = "Souls"
+    soulsLabel.Size = UDim2.new(0, 200, 0, 40)
+    soulsLabel.Position = UDim2.new(1, -210, 0, 20)
+    soulsLabel.BackgroundTransparency = 1
+    soulsLabel.TextColor3 = Color3.new(1, 0, 0)
+    soulsLabel.TextScaled = true
+    soulsLabel.Font = Enum.Font.Antique
+    soulsLabel.TextXAlignment = Enum.TextXAlignment.Right
+    soulsLabel.Parent = gui
+
+	-- DAMAGE PROGRESS BAR
+	local damageGui = Instance.new("ScreenGui")
+	damageGui.Name = "DamageGui"
+	damageGui.ResetOnSpawn = false
+	damageGui.Parent = playerGui
+
+	local damageBarBg = Instance.new("Frame")
+	damageBarBg.Name = "Background"
+	damageBarBg.Size = UDim2.new(0, 20, 0, 200)
+	damageBarBg.Position = UDim2.new(1, -40, 0.5, -100)
+	damageBarBg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	damageBarBg.BorderSizePixel = 0
+	damageBarBg.Parent = damageGui
+
+	local damageBar = Instance.new("Frame")
+	damageBar.Name = "Bar"
+	damageBar.Size = UDim2.new(1, 0, 0, 0)
+	damageBar.Position = UDim2.new(0, 0, 1, 0)
+	damageBar.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+	damageBar.BorderSizePixel = 0
+	damageBar.Parent = damageBarBg
+
+	state.damageGui = damageGui
+	state.damageBar = damageBar
+	state.damageValue = 0
+
+    local progressBar = Instance.new("Frame")
+    progressBar.Name = "ProgressBar"
+    progressBar.Size = UDim2.new(0, 0, 0, 4)
+    progressBar.Position = UDim2.new(0, 0, 1, 0)
+    progressBar.BackgroundColor3 = Color3.new(1, 0, 0)
+    progressBar.BorderSizePixel = 0
+    progressBar.Parent = soulsLabel
+
+    state.soulsLabel = soulsLabel
+    updateSoulsUI(state)
+
+    task.spawn(showPopup, player, "CONSUME", CONSUME_SOUND_ID)
+
+	local damageValueObject = status:WaitForChild("DamageDone")
+
+-- Damage bar setup
+damageBar.AnchorPoint = Vector2.new(0, 1)
+damageBar.Position = UDim2.new(0, 0, 1, 0)
+
+local lastDamageDone = 0
+
+damageValueObject:GetPropertyChangedSignal("Value"):Connect(function()
+    if not playerStates[player] then return end
+    local state = playerStates[player]
+
+    local delta = damageValueObject.Value - lastDamageDone
+    lastDamageDone = damageValueObject.Value
+
+if delta > 0 then
+    local previous = state.damageProgress
+
+    state.damageProgress = math.clamp(state.damageProgress + delta, 0, 40000)
+    local percent = state.damageProgress / 40000
+
+    if state.damageBar then
+        state.damageBar.Size = UDim2.new(1, 0, percent, 0)
+    end
+
+    if previous < 40000 and state.damageProgress >= 40000 then
+        -- flash bar
+        TweenService:Create(state.damageBar, TweenInfo.new(0.15), {
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        }):Play()
+
+        task.delay(0.15, function()
+            TweenService:Create(state.damageBar, TweenInfo.new(0.2), {
+                BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+            }):Play()
+        end)
+
+        -- small screen feedback
+        screenShake(1, 0.2)
+        playSound(player.PlayerGui, BLOODLUST_ACTIVATE_SOUND_ID, false, 0.6)
+
+         -- optional popup
+            task.spawn(showPopup, player, "UNLEASH", BLOODLUST_READY_SOUND_ID)
+        end
+    end
+end)
+
+-- BLOODLUST logic with smooth damage bar drain
+local function startBloodlust(player, state)
+    local status = player:WaitForChild("Status")
+    local invListener
+
+    -- Ensure Invulnerable folder exists
+    local function ensureInvulnerable()
+        if not status:FindFirstChild("Invulnerable") then
+            local invFolder = Instance.new("Folder")
+            invFolder.Name = "Invulnerable"
+            invFolder.Parent = status
+        end
+    end
+
+    ensureInvulnerable()
+
+    -- Keep Invulnerable folder alive while BLOODLUST is active
+    invListener = status.ChildRemoved:Connect(function(child)
+        if child.Name == "Invulnerable" then
+            ensureInvulnerable()
+        end
+    end)
+
+    -- Show BLOODLUST popup
+    task.spawn(showPopup, player, "BLOODLUST", BLOODLUST_ACTIVATE_SOUND_ID)
+
+    -- After 40 seconds, end BLOODLUST
+    task.delay(40, function()
+        -- Disconnect invulnerability listener
+        if invListener then
+            invListener:Disconnect()
+        end
+
+        -- Remove Invulnerable folder
+        local invFolder = status:FindFirstChild("Invulnerable")
+        if invFolder then invFolder:Destroy() end
+
+        -- Smoothly drain the damage bar
+        local startValue = state.damageProgress
+        local bar = state.damageBar
+        local playerState = state
+
+        task.spawn(function()
+            local duration = 1 -- drain duration in seconds
+            local startTime = os.clock()
+
+            while os.clock() - startTime < duration do
+                if not playerStates[player] then break end
+                local alpha = (os.clock() - startTime) / duration
+                local value = startValue * (1 - alpha)
+
+                playerState.damageProgress = value
+                if bar then
+                    bar.Size = UDim2.new(1, 0, value / 40000, 0)
+                end
+
+                RunService.RenderStepped:Wait()
+            end
+
+            -- Ensure bar is fully reset
+            if playerStates[player] then
+                playerState.damageProgress = 0
+                if bar then
+                    bar.Size = UDim2.new(1, 0, 0, 0)
+                end
+            end
+        end)
+    end)
+end
+
+-- BLOODLUST activation
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+
+        if input.KeyCode == Enum.KeyCode.C and state.damageProgress >= 40000 then
+            local character = player.Character
+            if character and not status:FindFirstChild("Invulnerable") then
+                startBloodlust(player, state)
+            end
+        end
+    end)
+
+    -- Monitor Kills
+    killsValue:GetPropertyChangedSignal("Value"):Connect(function()
+        if not playerStates[player] then return end
+        local newKills = killsValue.Value
+        local gained = newKills - state.lastKills
+        if gained > 0 then
+            processKills(player, state, gained)
+        end
+        state.lastKills = newKills
+    end)
+
+    player.CharacterAdded:Connect(function(character)
+        hookCharacterAndInvulnerable(player, state, character)
+    end)
+
+    if player.Character then
+        hookCharacterAndInvulnerable(player, state, player.Character)
+    end
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerRemoving:Connect(function(player)
+	if playerStates[player] and playerStates[player].healthConnection then
+		playerStates[player].healthConnection:Disconnect()
+	end
+	playerStates[player] = nil
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do task.spawn(setupPlayer, player) end
