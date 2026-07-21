@@ -1,0 +1,1272 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local CONSUME_SOUND_ID = "rbxassetid://133537522827881"
+local KILL_SOUND_ID = "rbxassetid://109462129018702"
+local DISAPPOINT_SOUND_ID = "rbxassetid://129534580039933"
+local PROVE_WORTH_SOUND_ID = "rbxassetid://140388181095956"
+local RAMPAGE_POPUP_SOUND_ID = "rbxassetid://133537522827881"
+local RAMPAGE_LOOP_SOUND_ID = "rbxassetid://134593085572966" -- Song: Blunt Force - Full
+local BLOODLUST_ACTIVATE_SOUND_ID = "rbxassetid://99928861785298"
+local BLOODLUST_READY_SOUND_ID = "rbxassetid://139498709742800"
+local BLOODLUST_LOOP_SOUND_ID = "rbxassetid://112414326146758" -- Song: Blunt Force - Underscore Edition
+
+local MAX_SOULS = 25
+local RAMPAGE_DURATION = 121
+local RAMPAGE_FOV = 85
+local DEFAULT_FOV = 70
+
+local ENABLE_SCREEN_FLASH = false
+
+-- Combo counter settings
+local COMBO_TIMEOUT = 5
+local COMBO_MAX_MULTIPLIER = 3.0
+
+local function getComboMultiplier(combo)
+	if combo <= 0 then return 1.0 end
+	return math.min(COMBO_MAX_MULTIPLIER, 1.0 + math.floor(combo / 5) * 0.5)
+end
+
+-- Modes
+local rampageMode = "Fair" -- "Fair" or "Infinite"
+local infiniteRampage = false
+
+local movesFolder = ReplicatedStorage:FindFirstChild("Moves")
+local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
+
+local rampageActive = false
+local playerStates = {}
+
+local rampageLoopSound
+local descendantConnection
+local rampagePulseConnection
+local screenFlashGui
+local countdownBar
+local countdownConnection
+local bloodlustCC
+local bloodlustLoopSound
+
+getfenv().Activated = false
+
+local activeShake = 0
+
+local function screenShake(intensity, duration)
+	activeShake += intensity
+
+	task.spawn(function()
+		local camera = workspace.CurrentCamera
+		local start = os.clock()
+
+		while os.clock() - start < duration do
+			local t = (os.clock() - start) / duration
+			local fade = 1 - t
+
+			-- Rotation in degrees
+			local pitch = math.sin(t * 40) * activeShake * 0.8 * fade
+			local yaw   = math.cos(t * 36) * activeShake * 0.6 * fade
+			local roll  = math.sin(t * 52) * activeShake * 0.35 * fade
+
+			camera.CFrame *= CFrame.Angles(
+				math.rad(pitch),
+				math.rad(yaw),
+				math.rad(roll)
+			)
+
+			RunService.RenderStepped:Wait()
+		end
+
+		activeShake -= intensity
+	end)
+end
+
+local function screenFlash(color, duration)
+	if not ENABLE_SCREEN_FLASH then return end
+	local player = Players.LocalPlayer
+	if not player then return end
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+
+	if screenFlashGui then
+		screenFlashGui:Destroy()
+	end
+
+	screenFlashGui = Instance.new("ScreenGui")
+	screenFlashGui.Name = "ScreenFlash"
+	screenFlashGui.IgnoreGuiInset = true
+	screenFlashGui.DisplayOrder = 2000
+	screenFlashGui.Parent = playerGui
+
+	local flash = Instance.new("Frame")
+	flash.Size = UDim2.new(1, 0, 1, 0)
+	flash.Position = UDim2.new(0, 0, 0, 0)
+	flash.BackgroundColor3 = color
+	flash.BorderSizePixel = 0
+	flash.Parent = screenFlashGui
+
+	local tween = TweenService:Create(flash, TweenInfo.new(duration or 0.5), { BackgroundTransparency = 1 })
+	tween:Play()
+
+	tween.Completed:Connect(function()
+		screenFlashGui:Destroy()
+		screenFlashGui = nil
+	end)
+end
+
+local function FillHeat()
+	if not eventsFolder or not movesFolder then return end
+
+	local Event = eventsFolder:FindFirstChild("ME")
+	local TauntMove = movesFolder:FindFirstChild("Taunt")
+
+	if Event and TauntMove then
+		for i = 1, 6 do
+			local A_1 = {
+				[1] = "heat",
+				[2] = TauntMove
+			}
+			Event:FireServer(A_1)
+		end
+	end
+end
+
+local function playSound(parent, soundId, looped, volume)
+	if not soundId then return end
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Looped = looped or false
+	sound.Volume = volume or 1
+	sound.Parent = parent
+	sound:Play()
+
+	if not looped then
+		Debris:AddItem(sound, 10)
+	end
+
+	return sound
+end
+
+local function showTypewriterBillboard(character, message, soundId)
+	local head = character:FindFirstChild("Head")
+	if not head then return end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "RampageBillboard"
+	billboard.Size = UDim2.new(0, 400, 0, 100)
+	billboard.StudsOffset = Vector3.new(0, 4, 0)
+	billboard.Adornee = head
+	billboard.AlwaysOnTop = true
+	billboard.Parent = head
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 1, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = ""
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextStrokeTransparency = 0
+	textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.Parent = billboard
+
+	local currentSound = soundId or RAMPAGE_POPUP_SOUND_ID
+
+	for i = 1, #message do
+		local char = message:sub(i, i)
+		textLabel.Text = message:sub(1, i)
+
+		if char ~= " " then
+			playSound(head, currentSound, false, 0.4)
+			screenShake(0.5, 0.05)
+		end
+		task.wait(0.04)
+	end
+
+	task.wait(2)
+
+	local fadeTween = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, TextStrokeTransparency = 1 })
+	fadeTween:Play()
+
+	fadeTween.Completed:Connect(function()
+		billboard:Destroy()
+	end)
+end
+
+local activePopups = {}
+
+local function showPopup(player, message, soundId)
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+
+	-- Remove any existing popup for this player so texts don't overlap
+	local existing = activePopups[player]
+	if existing then
+		existing:Destroy()
+		activePopups[player] = nil
+	end
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "RampagePopup"
+	screenGui.IgnoreGuiInset = true
+	screenGui.DisplayOrder = 999
+	screenGui.Parent = playerGui
+	activePopups[player] = screenGui
+
+	-- Clean up reference when destroyed
+	screenGui.AncestryChanged:Connect(function(_, parent)
+		if not parent and activePopups[player] == screenGui then
+			activePopups[player] = nil
+		end
+	end)
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 0, 120)
+	textLabel.Position = UDim2.new(0, 0, 0.4, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = message:upper()
+	textLabel.TextColor3 = Color3.new(1, 0, 0)
+	textLabel.TextScaled = true
+	textLabel.Font = Enum.Font.Antique
+	textLabel.TextTransparency = 1
+	textLabel.Parent = screenGui
+
+	-- Glow stroke for popups
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.new(1, 0, 0)
+	stroke.Thickness = 3
+	stroke.Transparency = 0.5
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	stroke.Parent = textLabel
+
+	local gradient = Instance.new("UIGradient")
+	gradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 80, 80)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 0, 0)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(180, 0, 0))
+	})
+	gradient.Rotation = 90
+	gradient.Parent = textLabel
+
+	playSound(textLabel, soundId, false, 1)
+
+	-- Drop shadow behind popup text
+	local shadow = Instance.new("TextLabel")
+	shadow.Name = "Shadow"
+	shadow.Size = UDim2.new(1, 0, 0, 120)
+	shadow.Position = UDim2.new(0, 3, 0.4, 3)
+	shadow.BackgroundTransparency = 1
+	shadow.Text = message:upper()
+	shadow.TextColor3 = Color3.new(0, 0, 0)
+	shadow.TextTransparency = 1
+	shadow.TextStrokeTransparency = 1
+	shadow.TextScaled = true
+	shadow.Font = Enum.Font.Antique
+	shadow.ZIndex = textLabel.ZIndex - 1
+	shadow.Parent = screenGui
+
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	local fadeIn = TweenService:Create(textLabel, info, { TextTransparency = 0, Position = UDim2.new(0, 0, 0.45, 0) })
+	local shadowIn = TweenService:Create(shadow, info, { TextTransparency = 0.4, Position = UDim2.new(0, 3, 0.45, 3) })
+
+	fadeIn:Play()
+	shadowIn:Play()
+	fadeIn.Completed:Wait()
+
+	task.wait(2)
+
+	-- If this popup was replaced by a newer one, stop here
+	if not screenGui.Parent then return end
+
+	local fadeOut = TweenService:Create(textLabel, TweenInfo.new(1), { TextTransparency = 1, Position = UDim2.new(0, 0, 0.5, 0) })
+	local shadowOut = TweenService:Create(shadow, TweenInfo.new(1), { TextTransparency = 1, Position = UDim2.new(0, 3, 0.5, 3) })
+	fadeOut:Play()
+	shadowOut:Play()
+	fadeOut.Completed:Wait()
+
+	screenGui:Destroy()
+end
+
+local function showPopupToAll(message, soundId)
+	for _, player in ipairs(Players:GetPlayers()) do
+		task.spawn(showPopup, player, message, soundId)
+	end
+end
+
+local function updateSoulsUI(state)
+	if state.soulsLabel then
+		local percentage = state.soulsCount / MAX_SOULS
+		state.soulsLabel.Text = "SOULS: " .. tostring(state.soulsCount) .. " / " .. MAX_SOULS
+
+		local bar = state.soulsLabel:FindFirstChild("ProgressBar")
+		if bar then
+			TweenService:Create(bar, TweenInfo.new(0.3), { Size = UDim2.new(percentage, 0, 0, 4) }):Play()
+		end
+
+		if state.soulsCount > 0 then
+			-- Color flash
+			TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0.2, 0.2) }):Play()
+			task.delay(0.1, function()
+				TweenService:Create(state.soulsLabel, TweenInfo.new(0.1), { TextColor3 = Color3.new(1, 0, 0) }):Play()
+			end)
+
+			-- Scale bounce
+			local baseSize = state.soulsBaseSize or UDim2.new(0, 200, 0, 40)
+			TweenService:Create(state.soulsLabel, TweenInfo.new(0.08, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+				Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset + 20, baseSize.Y.Scale, baseSize.Y.Offset + 8)
+			}):Play()
+			task.delay(0.08, function()
+				TweenService:Create(state.soulsLabel, TweenInfo.new(0.12), { Size = baseSize }):Play()
+			end)
+		end
+	end
+end
+
+local function updateComboUI(state)
+	if not state.comboLabel then return end
+
+	local text = ""
+	if state.comboCount > 0 then
+		text = "COMBO x" .. state.comboCount
+		local dmgDisplay = string.format("%.1f", state.totalDamage or 0)
+		text = text .. "  DMG: " .. dmgDisplay
+	end
+	state.comboLabel.Text = text
+
+	if state.comboCount > 0 then
+		state.comboLabel.TextTransparency = 0
+		if state.comboBarBg then
+			state.comboBarBg.BackgroundTransparency = 0
+		end
+
+		-- Color shifts from white to gold as combo increases
+		local heat = math.clamp(state.comboCount / 25, 0, 1)
+		local comboColor = Color3.fromRGB(255, 255, 255):Lerp(Color3.fromRGB(255, 200, 50), heat)
+		state.comboLabel.TextColor3 = comboColor
+
+		-- Scale bounce
+		local baseSize = state.comboBaseSize or UDim2.new(0, 220, 0, 40)
+		TweenService:Create(state.comboLabel, TweenInfo.new(0.08, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset + 10, baseSize.Y.Scale, baseSize.Y.Offset + 4)
+		}):Play()
+		task.delay(0.08, function()
+			if state.comboLabel then
+				TweenService:Create(state.comboLabel, TweenInfo.new(0.12), { Size = baseSize }):Play()
+			end
+		end)
+	else
+		state.comboLabel.TextTransparency = 1
+		if state.comboBarBg then
+			state.comboBarBg.BackgroundTransparency = 1
+		end
+		if state.comboBar then
+			state.comboBar.Size = UDim2.new(0, 0, 1, 0)
+		end
+	end
+end
+
+local function ensureKillGoal(statsFolder)
+	local killGoal = statsFolder:FindFirstChild("killgoal")
+	if not killGoal then
+		killGoal = Instance.new("IntValue")
+		killGoal.Name = "killgoal"
+		killGoal.Parent = statsFolder
+	end
+	killGoal.Value = MAX_SOULS
+	return killGoal
+end
+
+local function getOrCreateEffects()
+	local cc = Lighting:FindFirstChild("RampageColorCorrection") or Instance.new("ColorCorrectionEffect", Lighting)
+	cc.Name = "RampageColorCorrection"
+
+	return cc
+end
+
+local function getOrCreateVignette()
+	local player = Players.LocalPlayer
+	if not player then return end
+
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	local vignette = playerGui:FindFirstChild("RampageVignette")
+	if not vignette then
+		vignette = Instance.new("ScreenGui")
+		vignette.Name = "RampageVignette"
+		vignette.IgnoreGuiInset = true
+		vignette.DisplayOrder = 1000
+		vignette.ResetOnSpawn = false
+		vignette.Parent = playerGui
+
+		local image = Instance.new("ImageLabel")
+		image.Name = "Vignette"
+		image.Size = UDim2.new(1, 0, 1, 0)
+		image.Position = UDim2.new(0, 0, 0, 0)
+		image.BackgroundTransparency = 1
+		image.Image = "rbxassetid://18398876534" 
+		image.ImageColor3 = Color3.fromRGB(0, 0, 0)
+		image.ImageTransparency = 0
+		image.Parent = vignette
+	end
+
+	return vignette:FindFirstChild("Vignette")
+end
+
+local function tweenRampageVisuals(active)
+	local cc = getOrCreateEffects()
+	local camera = workspace.CurrentCamera
+	local vignette = getOrCreateVignette()
+
+	local ccGoal = active and {
+		Saturation = -0.2,
+		TintColor = Color3.fromRGB(240, 60, 60),
+		Contrast = 0.08
+	} or {
+		Saturation = 0,
+		TintColor = Color3.new(1, 1, 1),
+		Contrast = 0
+	}
+
+	local fovGoal = active and { FieldOfView = RAMPAGE_FOV } or { FieldOfView = DEFAULT_FOV }
+
+	TweenService:Create(cc, TweenInfo.new(1), ccGoal):Play()
+	TweenService:Create(camera, TweenInfo.new(2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), fovGoal):Play()
+
+	if vignette then
+		local vignetteGoal = active and { ImageTransparency = 0 } or { ImageTransparency = 1 }
+		TweenService:Create(vignette, TweenInfo.new(1.5), vignetteGoal):Play()
+	end
+end
+
+local function addSuperArmorToFolder(folder)
+	if not folder or not folder:IsA("Folder") or folder.Name == "SuperArmor" then return end
+	if not movesFolder or not folder:IsDescendantOf(movesFolder) then return end
+
+	if not folder:FindFirstChild("SuperArmor") then
+		local superArmor = Instance.new("Folder")
+		superArmor.Name = "SuperArmor"
+		superArmor.Parent = folder
+	end
+end
+
+local function addSuperArmorFolders()
+	if not movesFolder then return end
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		addSuperArmorToFolder(obj)
+	end
+end
+
+local function removeAllSuperArmorFolders()
+	if not movesFolder then return end
+	for _, obj in ipairs(movesFolder:GetDescendants()) do
+		if obj:IsA("Folder") and obj.Name == "SuperArmor" then
+			obj:Destroy()
+		end
+	end
+end
+
+local function endRampage()
+	infiniteRampage = false
+
+	screenFlash(Color3.fromRGB(200, 200, 255), 0.5)
+
+	if rampagePulseConnection then
+		rampagePulseConnection:Disconnect()
+		rampagePulseConnection = nil
+	end
+
+	if countdownConnection then
+		countdownConnection:Disconnect()
+		countdownConnection = nil
+	end
+
+	local localPlayer = Players.LocalPlayer
+	if localPlayer then
+		local playerGui = localPlayer:FindFirstChild("PlayerGui")
+		if playerGui then
+			local countdownGui = playerGui:FindFirstChild("RampageCountdown")
+			if countdownGui then countdownGui:Destroy() end
+		end
+	end
+	countdownBar = nil
+
+	-- Clean up bloodlust color correction
+	if bloodlustCC then
+		TweenService:Create(bloodlustCC, TweenInfo.new(1), {
+			Saturation = 0,
+			TintColor = Color3.new(1, 1, 1),
+			Contrast = 0
+		}):Play()
+		local ccRef = bloodlustCC
+		bloodlustCC = nil
+		task.delay(1, function()
+			if ccRef then ccRef:Destroy() end
+		end)
+	end
+
+	-- Clean up Bloodlust loop sound if still playing
+	if bloodlustLoopSound then
+		local oldSound = bloodlustLoopSound
+		bloodlustLoopSound = nil
+		TweenService:Create(oldSound, TweenInfo.new(2), { Volume = 0 }):Play()
+		task.delay(2, function()
+			if oldSound then oldSound:Destroy() end
+		end)
+	end
+
+	if descendantConnection then
+		descendantConnection:Disconnect()
+		descendantConnection = nil
+	end
+
+	if rampageLoopSound then
+		local oldSound = rampageLoopSound
+		rampageLoopSound = nil
+
+		TweenService:Create(oldSound, TweenInfo.new(2), { Volume = 0 }):Play()
+
+		task.delay(2, function()
+			if oldSound then
+				oldSound:Destroy()
+			end
+		end)
+	end
+
+	getfenv().Activated = false
+	removeAllSuperArmorFolders()
+	tweenRampageVisuals(false)
+	rampageActive = false
+
+	for player, state in pairs(playerStates) do
+		state.soulsCount = 0
+		if state.killGoal then
+			state.killGoal.Value = MAX_SOULS
+		end
+		updateSoulsUI(state)
+
+		-- Reset combo on rampage end
+		state.comboCount = 0
+		state.totalDamage = 0
+		state.comboDeadline = 0
+		updateComboUI(state)
+
+		local queued = state.pendingKills or 0
+		state.pendingKills = 0
+
+		if queued > 0 then
+			task.spawn(function()
+				for i = 1, queued do
+					if rampageActive then return end
+
+					task.wait(0.2)
+
+					state.soulsCount += 1
+
+					if state.soulsCount >= MAX_SOULS then
+						startRampage(player)
+						return
+					end
+
+					updateSoulsUI(state)
+				end
+			end)
+		end
+	end
+end
+
+local function startRampage(triggeringPlayer)
+	if rampageActive then return end
+	rampageActive = true
+
+	local styles = ReplicatedStorage:FindFirstChild("Styles")
+	if styles then
+		local brawler = styles:FindFirstChild("Brawler")
+		if brawler then
+			local visualName = brawler:FindFirstChild("VisualName")
+			if visualName then
+				visualName.Value = "FISTICUFFS"
+			end
+		end
+	end
+	getfenv().Activated = true
+
+	task.spawn(function()
+		while getfenv().Activated do
+			FillHeat()
+			task.wait(0.1)
+		end
+	end)
+
+	if triggeringPlayer and triggeringPlayer.Character then
+		task.spawn(showTypewriterBillboard, triggeringPlayer.Character, "PROVE YOUR WORTH.", PROVE_WORTH_SOUND_ID)
+		screenShake(2, 1)
+	end
+
+	showPopupToAll("RAMPAGE", RAMPAGE_POPUP_SOUND_ID)
+	tweenRampageVisuals(true)
+	screenFlash(Color3.new(1, 0, 0), 0.4)
+
+	-- Pulsing vignette + FOV breathing during rampage
+	if rampagePulseConnection then rampagePulseConnection:Disconnect() end
+	local pulseVignette = getOrCreateVignette()
+	local pulseStart = os.clock()
+	rampagePulseConnection = RunService.RenderStepped:Connect(function()
+		if not rampageActive then
+			rampagePulseConnection:Disconnect()
+			rampagePulseConnection = nil
+			return
+		end
+		local t = os.clock() - pulseStart
+		if pulseVignette then
+			local pulse = 0.25 + 0.15 * math.sin(t * 3)
+			pulseVignette.ImageTransparency = pulse
+		end
+		local pulseCamera = workspace.CurrentCamera
+		if pulseCamera then
+			pulseCamera.FieldOfView = RAMPAGE_FOV + 2 * math.sin(t * 1.5)
+		end
+	end)
+
+	-- Handle sound transition: if Bloodlust loop is playing, fade it out and start Rampage loop at same timeposition
+	if bloodlustLoopSound then
+		local bloodTimePos = bloodlustLoopSound.TimePosition
+		local oldBloodSound = bloodlustLoopSound
+		bloodlustLoopSound = nil
+
+		-- Fade out Bloodlust loop
+		TweenService:Create(oldBloodSound, TweenInfo.new(2), { Volume = 0 }):Play()
+		task.delay(2, function()
+			if oldBloodSound then oldBloodSound:Destroy() end
+		end)
+
+		-- Start Rampage loop at 0 volume and fade in, matching Bloodlust's timeposition
+		rampageLoopSound = playSound(SoundService, RAMPAGE_LOOP_SOUND_ID, true, 0)
+		rampageLoopSound.TimePosition = bloodTimePos
+		TweenService:Create(rampageLoopSound, TweenInfo.new(2), { Volume = 0.8 }):Play()
+	else
+		rampageLoopSound = playSound(SoundService, RAMPAGE_LOOP_SOUND_ID, true, 0.8)
+	end
+	addSuperArmorFolders()
+
+	if movesFolder then
+		descendantConnection = movesFolder.DescendantAdded:Connect(function(obj)
+			if rampageActive and obj:IsA("Folder") then
+				task.defer(addSuperArmorToFolder, obj)
+			end
+		end)
+	end
+
+	if not infiniteRampage then
+		-- Countdown timer bar at top of screen
+		local localPlayer = Players.LocalPlayer
+		if localPlayer then
+			local playerGui = localPlayer:FindFirstChild("PlayerGui")
+			if playerGui then
+				local existing = playerGui:FindFirstChild("RampageCountdown")
+				if existing then existing:Destroy() end
+
+				local countdownGui = Instance.new("ScreenGui")
+				countdownGui.Name = "RampageCountdown"
+				countdownGui.IgnoreGuiInset = true
+				countdownGui.DisplayOrder = 998
+				countdownGui.ResetOnSpawn = false
+				countdownGui.Parent = playerGui
+
+				local barBg = Instance.new("Frame")
+				barBg.Size = UDim2.new(0.3, 0, 0, 6)
+				barBg.Position = UDim2.new(0.5, 0, 0, 10)
+				barBg.AnchorPoint = Vector2.new(0.5, 0)
+				barBg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+				barBg.BorderSizePixel = 0
+				barBg.Parent = countdownGui
+
+				countdownBar = Instance.new("Frame")
+				countdownBar.Size = UDim2.new(1, 0, 1, 0)
+				countdownBar.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+				countdownBar.BorderSizePixel = 0
+				countdownBar.Parent = barBg
+
+				local countdownGlow = Instance.new("UIStroke")
+				countdownGlow.Name = "Glow"
+				countdownGlow.Color = Color3.fromRGB(255, 50, 50)
+				countdownGlow.Thickness = 2
+				countdownGlow.Transparency = 0.7
+				countdownGlow.Parent = countdownBar
+
+				local rampStart = os.clock()
+				if countdownConnection then countdownConnection:Disconnect() end
+				countdownConnection = RunService.RenderStepped:Connect(function()
+					if not rampageActive or not countdownBar then
+						if countdownConnection then
+							countdownConnection:Disconnect()
+							countdownConnection = nil
+						end
+						return
+					end
+					local elapsed = os.clock() - rampStart
+					local remaining = math.max(0, 1 - (elapsed / RAMPAGE_DURATION))
+					countdownBar.Size = UDim2.new(remaining, 0, 1, 0)
+					countdownBar.BackgroundColor3 = Color3.fromRGB(
+						math.floor(255 * remaining + 80 * (1 - remaining)),
+						math.floor(50 * remaining),
+						math.floor(50 * remaining)
+					)
+					local glow = countdownBar:FindFirstChild("Glow")
+					if glow then
+						glow.Transparency = 0.3 + 0.4 * remaining
+						glow.Thickness = 2 + 6 * (1 - remaining)
+					end
+				end)
+			end
+		end
+
+		task.delay(RAMPAGE_DURATION, function()
+			if rampageActive then
+				endRampage()
+			end
+		end)
+	end
+end
+
+local function processKills(player, state, gained)
+	if gained <= 0 then return end
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+
+	for i = 1, gained do
+		playSound(playerGui, KILL_SOUND_ID, false, 0.8)
+		screenShake(0.3, 0.2)
+
+		-- Kill flash
+		screenFlash(Color3.fromRGB(255, 80, 80), 0.15)
+
+		if rampageActive then
+			state.pendingKills = (state.pendingKills or 0) + (gained - i + 1)
+			return
+		end
+
+		state.soulsCount += 1
+		if state.soulsCount >= MAX_SOULS then
+			state.soulsCount = MAX_SOULS
+			if state.killGoal then state.killGoal.Value = 0 end
+			updateSoulsUI(state)
+			startRampage(player)
+			return
+		else
+			if state.killGoal then state.killGoal.Value = MAX_SOULS - state.soulsCount end
+			updateSoulsUI(state)
+		end
+	end
+end
+
+local function hookCharacterAndInvulnerable(player, state, character, customDuration)
+	local duration = customDuration or 30
+	local status = player:FindFirstChild("Status")
+	if not status then return end
+	local healthValue = status:FindFirstChild("Health")
+	if not healthValue then return end
+	local timerTask
+
+	local function stopInvulnerable()
+		if timerTask then
+			task.cancel(timerTask)
+			timerTask = nil
+		end
+		local invFolder = status:FindFirstChild("Invulnerable")
+		if invFolder then
+			invFolder:Destroy()
+		end
+	end
+
+	local function startInvulnerable()
+		if timerTask then return end
+
+		-- Create Invulnerable folder immediately
+		local invFolder = status:FindFirstChild("Invulnerable")
+		if not invFolder then
+			invFolder = Instance.new("Folder")
+			invFolder.Name = "Invulnerable"
+			invFolder.Parent = status
+		end
+	end
+
+	local function onHealthChanged()
+		if healthValue.Value <= 0 then
+			stopInvulnerable()
+			state.soulsCount = 0
+			state.pendingKills = 0
+			if state.killGoal then state.killGoal.Value = MAX_SOULS end
+			updateSoulsUI(state)
+
+			-- Reset combo on death
+			state.comboCount = 0
+			state.totalDamage = 0
+			state.comboDeadline = 0
+			updateComboUI(state)
+
+			task.spawn(showPopup, player, "YOU DISAPPOINT", DISAPPOINT_SOUND_ID)
+		elseif healthValue.Value <= 100 then
+			startInvulnerable()
+		end
+	end
+
+	if state.healthConnection then
+		state.healthConnection:Disconnect()
+	end
+	state.healthConnection = healthValue:GetPropertyChangedSignal("Value"):Connect(onHealthChanged)
+
+	onHealthChanged()
+end
+
+-- UPDATED setupPlayer
+local function setupPlayer(player)
+	local playerGui = player:FindFirstChild("PlayerGui")
+	if not playerGui then return end
+	local status = player:FindFirstChild("Status")
+	local statsFolder = status and status:FindFirstChild("Stats")
+	local killsValue = statsFolder and statsFolder:FindFirstChild("Kills")
+	local killGoalValue = statsFolder and ensureKillGoal(statsFolder) or nil
+
+	local state = {
+		soulsCount = 0,
+		pendingKills = 0,
+		killGoal = killGoalValue,
+		soulsLabel = nil,
+		healthConnection = nil,
+		lastKills = killsValue and killsValue.Value or 0,
+		damageProgress = 0,
+		comboCount = 0,
+		comboDeadline = 0,
+		comboTask = nil,
+		comboLabel = nil,
+		comboBar = nil,
+		comboBarBg = nil,
+		comboBaseSize = nil,
+		totalDamage = 0,
+	}
+	playerStates[player] = state
+
+	-- GUI setup
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SoulsGui"
+	gui.ResetOnSpawn = false
+	gui.Parent = playerGui
+
+	local soulsLabel = Instance.new("TextLabel")
+	soulsLabel.Name = "Souls"
+	soulsLabel.Size = UDim2.new(0, 200, 0, 40)
+	soulsLabel.Position = UDim2.new(1, -210, 0, 20)
+	soulsLabel.BackgroundTransparency = 1
+	soulsLabel.TextColor3 = Color3.new(1, 0, 0)
+	soulsLabel.TextScaled = true
+	soulsLabel.Font = Enum.Font.Antique
+	soulsLabel.TextXAlignment = Enum.TextXAlignment.Right
+	soulsLabel.Parent = gui
+
+	-- DAMAGE PROGRESS BAR
+	local damageGui = Instance.new("ScreenGui")
+	damageGui.Name = "DamageGui"
+	damageGui.ResetOnSpawn = false
+	damageGui.Parent = playerGui
+
+	local damageBarBg = Instance.new("Frame")
+	damageBarBg.Name = "Background"
+	damageBarBg.Size = UDim2.new(0, 20, 0, 200)
+	damageBarBg.Position = UDim2.new(1, -40, 0.5, -100)
+	damageBarBg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	damageBarBg.BorderSizePixel = 0
+	damageBarBg.Parent = damageGui
+
+	local damageBar = Instance.new("Frame")
+	damageBar.Name = "Bar"
+	damageBar.Size = UDim2.new(1, 0, 0, 0)
+	damageBar.Position = UDim2.new(0, 0, 1, 0)
+	damageBar.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+	damageBar.BorderSizePixel = 0
+	damageBar.Parent = damageBarBg
+
+	local damageGradient = Instance.new("UIGradient")
+	damageGradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(150, 0, 0)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 60, 60))
+	})
+	damageGradient.Rotation = 90
+	damageGradient.Parent = damageBar
+
+	state.damageGui = damageGui
+	state.damageBar = damageBar
+	state.damageValue = 0
+
+	local progressBar = Instance.new("Frame")
+	progressBar.Name = "ProgressBar"
+	progressBar.Size = UDim2.new(0, 0, 0, 4)
+	progressBar.Position = UDim2.new(0, 0, 1, 0)
+	progressBar.BackgroundColor3 = Color3.new(1, 0, 0)
+	progressBar.BorderSizePixel = 0
+	progressBar.Parent = soulsLabel
+
+	local progressGradient = Instance.new("UIGradient")
+	progressGradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 0, 0)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 50, 50))
+	})
+	progressGradient.Parent = progressBar
+
+	state.soulsLabel = soulsLabel
+	state.soulsBaseSize = soulsLabel.Size
+	updateSoulsUI(state)
+
+	-- COMBO COUNTER UI (bottom center, smaller)
+	local comboGui = Instance.new("ScreenGui")
+	comboGui.Name = "ComboGui"
+	comboGui.ResetOnSpawn = false
+	comboGui.Parent = playerGui
+
+	local comboLabel = Instance.new("TextLabel")
+	comboLabel.Name = "ComboText"
+	comboLabel.Size = UDim2.new(0, 220, 0, 40)
+	comboLabel.Position = UDim2.new(0.5, 0, 1, -50)
+	comboLabel.AnchorPoint = Vector2.new(0.5, 0)
+	comboLabel.BackgroundTransparency = 1
+	comboLabel.Text = ""
+	comboLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	comboLabel.TextScaled = true
+	comboLabel.Font = Enum.Font.Antique
+	comboLabel.TextTransparency = 1
+	comboLabel.Parent = comboGui
+
+	-- Timeout bar below combo text (hidden when no combo)
+	local comboBarBg = Instance.new("Frame")
+	comboBarBg.Name = "TimeoutBarBg"
+	comboBarBg.Size = UDim2.new(0, 220, 0, 3)
+	comboBarBg.Position = UDim2.new(0.5, 0, 1, -18)
+	comboBarBg.AnchorPoint = Vector2.new(0.5, 0)
+	comboBarBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	comboBarBg.BorderSizePixel = 0
+	comboBarBg.BackgroundTransparency = 1
+	comboBarBg.Parent = comboGui
+
+	local comboBar = Instance.new("Frame")
+	comboBar.Name = "TimeoutBar"
+	comboBar.Size = UDim2.new(0, 0, 1, 0)
+	comboBar.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
+	comboBar.BorderSizePixel = 0
+	comboBar.Parent = comboBarBg
+
+	state.comboLabel = comboLabel
+	state.comboBaseSize = comboLabel.Size
+	state.comboBar = comboBar
+	state.comboBarBg = comboBarBg
+
+	task.spawn(showPopup, player, "CONSUME", CONSUME_SOUND_ID)
+
+	local damageValueObject = status and status:FindFirstChild("DamageDone")
+
+	-- Damage bar setup
+	damageBar.AnchorPoint = Vector2.new(0, 1)
+	damageBar.Position = UDim2.new(0, 0, 1, 0)
+
+	local lastDamageDone = 0
+
+	if damageValueObject then
+		damageValueObject:GetPropertyChangedSignal("Value"):Connect(function()
+			if not playerStates[player] then return end
+			local state = playerStates[player]
+
+			local delta = damageValueObject.Value - lastDamageDone
+			lastDamageDone = damageValueObject.Value
+
+			if delta > 0 then
+				-- Register combo hit (tracks any damage increase)
+				state.comboCount += 1
+				state.totalDamage = (state.totalDamage or 0) + delta
+				state.comboDeadline = os.clock() + COMBO_TIMEOUT
+				updateComboUI(state)
+
+				-- Start combo timeout watcher if not already running
+				if not state.comboTask or coroutine.status(state.comboTask) == "dead" then
+					state.comboTask = task.spawn(function()
+						while true do
+							task.wait(0.05)
+							if not state.comboLabel or not state.comboLabel.Parent then break end
+							if os.clock() >= state.comboDeadline then
+								state.comboCount = 0
+								state.totalDamage = 0
+								state.comboDeadline = 0
+								updateComboUI(state)
+								break
+							end
+							if state.comboBar then
+								local timeLeft = math.max(0, (state.comboDeadline - os.clock()) / COMBO_TIMEOUT)
+								state.comboBar.Size = UDim2.new(timeLeft, 0, 1, 0)
+							end
+						end
+					end)
+				end
+
+				if rampageActive then
+					screenShake(math.clamp(delta / 75, 0.2, 1.0), 0.12)
+				end
+
+				local previous = state.damageProgress
+
+				state.damageProgress = math.clamp(state.damageProgress + delta, 0, 40000)
+				local percent = state.damageProgress / 40000
+
+				if state.damageBar then
+					state.damageBar.Size = UDim2.new(1, 0, percent, 0)
+				end
+
+				if previous < 40000 and state.damageProgress >= 40000 then
+					-- flash bar
+					TweenService:Create(state.damageBar, TweenInfo.new(0.15), {
+						BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+					}):Play()
+
+					task.delay(0.15, function()
+						TweenService:Create(state.damageBar, TweenInfo.new(0.2), {
+							BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+						}):Play()
+					end)
+
+					-- small screen feedback
+					screenShake(1, 0.2)
+					playSound(player.PlayerGui, BLOODLUST_ACTIVATE_SOUND_ID, false, 0.6)
+
+					-- optional popup
+					task.spawn(showPopup, player, "UNLEASH", BLOODLUST_READY_SOUND_ID)
+
+					-- Pulsing damage bar while Bloodlust is ready
+					if state.bloodlustPulseConn then state.bloodlustPulseConn:Disconnect() end
+					local barRef = state.damageBar
+					local barPulseStart = os.clock()
+					state.bloodlustPulseConn = RunService.RenderStepped:Connect(function()
+						if not barRef or not barRef.Parent or state.damageProgress < 40000 then
+							if state.bloodlustPulseConn then
+								state.bloodlustPulseConn:Disconnect()
+								state.bloodlustPulseConn = nil
+							end
+							return
+						end
+						local pulse = 0.5 + 0.5 * math.sin((os.clock() - barPulseStart) * 6)
+						barRef.BackgroundColor3 = Color3.fromRGB(200, 0, 0):Lerp(Color3.fromRGB(255, 255, 255), pulse)
+					end)
+				end
+			end
+		end)
+	end
+
+	-- Ensure state.killGoal has a fallback if statsFolder didn't exist
+	if not state.killGoal then
+		state.killGoal = { Value = MAX_SOULS }
+	end
+
+	-- BLOODLUST logic with smooth damage bar drain
+	local function startBloodlust(player, state)
+		if not status then return end
+		local invListener
+
+		-- Ensure Invulnerable folder exists
+		local function ensureInvulnerable()
+			if not status:FindFirstChild("Invulnerable") then
+				local invFolder = Instance.new("Folder")
+				invFolder.Name = "Invulnerable"
+				invFolder.Parent = status
+			end
+		end
+
+		ensureInvulnerable()
+
+		-- Keep Invulnerable folder alive while BLOODLUST is active
+		invListener = status.ChildRemoved:Connect(function(child)
+			if child.Name == "Invulnerable" then
+				ensureInvulnerable()
+			end
+		end)
+
+		-- Stop pulsing damage bar
+		if state.bloodlustPulseConn then
+			state.bloodlustPulseConn:Disconnect()
+			state.bloodlustPulseConn = nil
+		end
+		if state.damageBar then
+			TweenService:Create(state.damageBar, TweenInfo.new(0.3), { BackgroundColor3 = Color3.fromRGB(200, 0, 0) }):Play()
+		end
+
+		-- Show BLOODLUST popup
+		task.spawn(showPopup, player, "BLOODLUST", BLOODLUST_ACTIVATE_SOUND_ID)
+		screenFlash(Color3.fromRGB(255, 200, 0), 0.3)
+
+		-- Play Bloodlust loop sound (fade in)
+		if bloodlustLoopSound then
+			bloodlustLoopSound:Destroy()
+			bloodlustLoopSound = nil
+		end
+		bloodlustLoopSound = playSound(SoundService, BLOODLUST_LOOP_SOUND_ID, true, 0)
+		TweenService:Create(bloodlustLoopSound, TweenInfo.new(1), { Volume = 0.8 }):Play()
+
+		-- Bloodlust golden color correction
+		if bloodlustCC then bloodlustCC:Destroy() end
+		bloodlustCC = Instance.new("ColorCorrectionEffect")
+		bloodlustCC.Name = "BloodlustCC"
+		bloodlustCC.Saturation = 0
+		bloodlustCC.TintColor = Color3.new(1, 1, 1)
+		bloodlustCC.Contrast = 0
+		bloodlustCC.Parent = Lighting
+
+		TweenService:Create(bloodlustCC, TweenInfo.new(1), {
+			Saturation = 0.3,
+			TintColor = Color3.fromRGB(255, 220, 100),
+			Contrast = 0.12
+		}):Play()
+
+		-- After 40 seconds, end BLOODLUST
+		task.delay(121, function()
+			-- Disconnect invulnerability listener
+			if invListener then
+				invListener:Disconnect()
+			end
+
+			-- Fade out Bloodlust loop sound
+			if bloodlustLoopSound then
+				local oldSound = bloodlustLoopSound
+				bloodlustLoopSound = nil
+				TweenService:Create(oldSound, TweenInfo.new(2), { Volume = 0 }):Play()
+				task.delay(2, function()
+					if oldSound then oldSound:Destroy() end
+				end)
+			end
+
+			-- Remove Invulnerable folder
+			local invFolder = status:FindFirstChild("Invulnerable")
+			if invFolder then invFolder:Destroy() end
+
+			-- Fade out bloodlust golden color correction
+			if bloodlustCC then
+				TweenService:Create(bloodlustCC, TweenInfo.new(1), {
+					Saturation = 0,
+					TintColor = Color3.new(1, 1, 1),
+					Contrast = 0
+				}):Play()
+				local ccRef = bloodlustCC
+				bloodlustCC = nil
+				task.delay(1, function()
+					if ccRef then ccRef:Destroy() end
+				end)
+			end
+
+			-- Smoothly drain the damage bar
+			local startValue = state.damageProgress
+			local bar = state.damageBar
+			local playerState = state
+
+			task.spawn(function()
+				local duration = 1 -- drain duration in seconds
+				local startTime = os.clock()
+
+				while os.clock() - startTime < duration do
+					if not playerStates[player] then break end
+					local alpha = (os.clock() - startTime) / duration
+					local value = startValue * (1 - alpha)
+
+					playerState.damageProgress = value
+					if bar then
+						bar.Size = UDim2.new(1, 0, value / 40000, 0)
+					end
+
+					RunService.RenderStepped:Wait()
+				end
+
+				-- Ensure bar is fully reset
+				if playerStates[player] then
+					playerState.damageProgress = 0
+					if bar then
+						bar.Size = UDim2.new(1, 0, 0, 0)
+					end
+				end
+			end)
+		end)
+	end
+
+	-- BLOODLUST activation
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+
+		if input.KeyCode == Enum.KeyCode.Z then
+			local previousMode = rampageMode
+			rampageMode = (rampageMode == "Fair") and "Infinite" or "Fair"
+
+			-- If switching away from Infinite while rampage is active, end it instantly
+			if previousMode == "Infinite" and rampageMode == "Fair" and rampageActive then
+				endRampage()
+			end
+
+			task.spawn(showPopup, player, "MODE: "..rampageMode)
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.X and rampageMode == "Infinite" then
+			if not rampageActive then
+				infiniteRampage = true
+				startRampage(player)
+			else
+				endRampage()
+			end
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.C and state.damageProgress >= 40000 then
+			local character = player.Character
+			if character and (not status or not status:FindFirstChild("Invulnerable")) then
+				startBloodlust(player, state)
+			end
+		end
+	end)
+
+	-- Monitor Kills
+	if killsValue then
+		killsValue:GetPropertyChangedSignal("Value"):Connect(function()
+			if not playerStates[player] then return end
+			local newKills = killsValue.Value
+			local gained = newKills - state.lastKills
+			if gained > 0 then
+				processKills(player, state, gained)
+			end
+			state.lastKills = newKills
+		end)
+	end
+
+	player.CharacterAdded:Connect(function(character)
+		hookCharacterAndInvulnerable(player, state, character)
+	end)
+
+	if player.Character then
+		hookCharacterAndInvulnerable(player, state, player.Character)
+	end
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerRemoving:Connect(function(player)
+	local removedState = playerStates[player]
+	if removedState then
+		if removedState.healthConnection then
+			removedState.healthConnection:Disconnect()
+		end
+		if removedState.bloodlustPulseConn then
+			removedState.bloodlustPulseConn:Disconnect()
+			removedState.bloodlustPulseConn = nil
+		end
+	end
+	if removedState.comboTask then
+		task.cancel(removedState.comboTask)
+		removedState.comboTask = nil
+	end
+	playerStates[player] = nil
+	activePopups[player] = nil
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do task.spawn(setupPlayer, player) end
