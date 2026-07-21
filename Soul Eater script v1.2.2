@@ -68,9 +68,9 @@ local function screenShake(intensity, duration)
 			local fade = 1 - t
 
 			-- Rotation in degrees
-			local pitch = math.sin(t * 40) * activeShake * 0.8 * fade
-			local yaw   = math.cos(t * 36) * activeShake * 0.6 * fade
-			local roll  = math.sin(t * 52) * activeShake * 0.35 * fade
+			local pitch = math.sin(t * 40) * activeShake * 2.5 * fade
+            local yaw   = math.cos(t * 36) * activeShake * 2.0 * fade
+            local roll  = math.sin(t * 52) * activeShake * 1.0 * fade
 
 			camera.CFrame *= CFrame.Angles(
 				math.rad(pitch),
@@ -1009,7 +1009,7 @@ local function setupPlayer(player)
 				end
 
 				if rampageActive then
-					screenShake(math.clamp(delta / 75, 0.2, 1.0), 0.12)
+					screenShake(math.clamp(delta / 50, 0.3, 1.5), 0.15)
 				end
 
 				local previous = state.damageProgress
